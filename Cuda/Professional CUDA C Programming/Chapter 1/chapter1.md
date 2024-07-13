@@ -36,6 +36,57 @@ CUDA编程十分适合数据并行。数据并行将要处理的数据项映射�
 * MIMD
     * 有多个核，每个核独立运行指令，作用于不同数据流。大多数MIMD可由多个SIMD作为子部件构成。
 
+在计算架构方面，许多架构在实现：1. 减少延迟；2. 增加带宽；3. 增加吞吐量。
+
+* 延迟 Latency
+    * 一个操作开始到结束所花费的时间，常以毫秒计量。
+* 带宽 Bandwidth
+    * 单位时间处理的数据量，常以MB/s、GB/s计量。
+* 吞吐量 Throughput
+    * 单位时间处理的指令数，常以gflops（十亿浮点操作/秒）计量。
+
+依照内存的组织方式，计算机架构可以进一步被分为分布式内存的多节点结构 Multi-node with distributed memory、共享内存的多处理器架构 Multiprocessor with shared memory。
+
+* 分布式内存的多节点结构 Multi-node with distributed memory
+  * 在多节点系统，大规模的计算引擎由多个处理器组成，它们通过网络进行互联，每一个处理器均有自己的内存。
+
+![分布式内存的多节点结构](pic/3%20Multi-node%20with%20distributed%20memory.png "Multi-node with distributed memory")
+
+* 共享内存的多处理器架构 Multiprocessor with shared memory
+  * 多处理器架构中，处理器会连接到同一个内存，或共享一个低延迟连接（如PCI-Express）。多处理器可以是只有一个芯片，芯片中有多个核，这称为多核（multicore），也可以是拥有多个芯片，每个芯片可能也为多核。
+
+![共享内存的多处理器架构](pic/4%20Multiprocessor%20with%20shared%20memory.png "Multiprocessor with shared memory")
+
+众核（many-core）用于形容比多核的核还要多的多核架构，常有几十个或几百个核。GPU是一个众核架构。
+
+## 异构计算 HETEROGENEOUS COMPUTUNG
+### 异构架构
+GPUs必须通过PCIe总线和CPU一起使用，也因此CPU称为host，GPU称为device。
+
+![异构架构](pic/5%20heterogeneous%20architecture.png "heterogeneous architecture")
+
+异构应用由host code和device code组成，其分别运行于CPU、GPU。CPU上的代码不仅要管理环境、代码，还要在计算任务加载进device前管理device上的数据。
+
+NVIDIA的GPU计算平台（computing platform）可以在以下四类GPU上运行：
+1. Tegra，用于嵌入式设备和移动设备；
+2. GeForce，进行图形计算；
+3. Quadro，用于专业视觉计算；
+4. Tesla，用于数据并行计算。
+
+在Tesla家族，有几款GPU：
+1. Fermi，2010年出产，是世界上第一个完成的GPU架构。
+2. Kepler，Fermi之后推出的GOU计算架构，在2012年出产。
+
+GPU有两个主要的特性用于描述其性能：CUDA核数（Number of CUDA cores）和显存大小（Memory size）；由此，对应有两个指标用来评价GPU的表现：峰值计算性能（Peak computational performance）和显存带宽（Memory bandwidth）。峰值计算性能由gflops或tflops表示，显存带宽用GB/s表示。
+
+NVIDIA使用compute capability来描述Tesla产品家族的GPU版本，具有相同主要修订号（应该是小数点之前的数字）的设备具有相同的核心架构。  
+|架构|主要版本号|
+|:----:|:--------:|
+|Kepler|3|   
+|Fermi|2|
+|Tesla|1|     
+
+NVIDIA提出的第一种架构和系列名称Tesla相同。
 
 
 
