@@ -88,6 +88,21 @@ NVIDIA使用compute capability来描述Tesla产品家族的GPU版本，具有相
 
 NVIDIA提出的第一种架构和系列名称Tesla相同。
 
+## 异构计算的范式 Paradigm of Heterogeneous Computing
+CPU对于处理动态工作流（有少量计算操作和无法预测的控制流）更有优势，GPU则更擅长只有简单控制流的计算任务。由此，为了使程序表现最好，需要将串行任务放在CPU上，而处理数据的并行任务放于GPU上。
+
+## CUDA: 一个异步编程的平台
+CUDA是通用并行计算平台/编程模型，它可以利用NVIDIA GPUs中的并行计算引擎去解决许多复杂的计算问题。
+
+CUDA C是标准ANSI C的扩展。CUDA提供两种API等级，以操作GPU、管理线程：CUDA Driver API和CUDA Runtime API。  
+Driver API是更接近底层的API，它相对难以编程，但能对GPU有更多的控制；Runtime API更高级，它是用Driver API实现的。所有Runtime API编写的函数都会被分成更基础的操作，传给Driver API。
+
+![CUDA API](pic/6%20CUDA%20API.png "CUDA API")
+
+在使用时，对于使用何种API，并不会带来运行速度上的显著差别。运行时间更取决于其它因素，如内核如何使用内存、线程如何组织等。
+
+NVIDIA' CUDA nvcc编译器会将device代码与host代码分开。device代码由一个个并行函数组成，每个并行函数为一个kernel。device代码会被nvcc编译。  
+nvcc编译器是在LLVM开源编译器基础上编写的.
 
 
 
