@@ -105,7 +105,30 @@ NVIDIA' CUDA nvcc编译器会将device代码与host代码分开。device代码�
 nvcc编译器是在LLVM开源编译器基础上编写的.
 
 
+## HELLO WORLD FROM GPU
+以下为hello.cu
 
+``` c
+#include <stdio.h>
 
+__global__ void helloFromGPU(void) {
+    printf("Hello World from GPU!\n");
+}
 
+int main() {
+    printf("Hello World from CPU!\n");
+
+    helloFromGPU<<<1, 10>>>();
+    cudaDeviceReset();
+    return 0;
+}
+```
+在该程序中，修饰词__global__告诉编译器该函数会被CPU调用并于GPU执行。  
+`helloFromGPU<<<1, 10>>>();` 这行代码中，三个尖角括号标记了从主线程对设备端代码的调用。该内核将会由一个线程阵列运行，所有线程都会执行相同的代码。尖括号内的参数会决定有多少个线程被执行。
+
+`cudaDeviceReset()`函数会销毁清除当前进程中使用设备的所有资源。
+
+在使用nvcc编译时，可以使用-arch参数，如：  
+`$ nvcc -arch sm_70 hello.cu -o hello`  
+-arch会指定虚拟架构的计算能力。要运行编译后的文件，机器的计算能力应该不小于指定的计算能力。
 
