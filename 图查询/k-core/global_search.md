@@ -1,5 +1,4 @@
-# 论文 The Community-search Problem and How to Plan a Successful Cocktail Party 笔记
-2010
+## The Community-search Problem and How to Plan a Successful Cocktail Party 2010
 
 ### 问题定义
 
@@ -42,11 +41,62 @@ PROOF. 设$G_O$为该问题的最优解。假设在GREEDY的第t步$G_O$中第�
 
 实际上，对于$f$，可以推广到任意单调函数，Greedy都能寻找到关于Problem 2的最优解。
 
-Definition 1（单调函数）  
-设V为一组节点，$\mathcal{G}_V$是所有可以在V上定义的图的集合，$f$是以$\mathcal{G}_V$的图为输入、分数为输出的一个函数，即$f:\mathcal{G}_V \rightarrow \mathbb{R}$。则$f$为单调函数当且仅当对于每个G，任何G的导出子图，均有：$f(H) \le f(G)$ 或 $f(H) \ge f(G)$。
+**Definition 1**（单调函数）  
+设V为一组节点，$\mathcal{G}_V$是所有可以在V上定义的图的集合（图的点一定为V），$f$是以$\mathcal{G}_V$的图为输入、分数为输出的一个函数，即$f:\mathcal{G}_V \rightarrow \mathbb{R}$。则$f$为单调函数当且仅当对于每个G，任何G的导出子图H（不是点导出子图，H拥有和G一样的点集），均有：$f(H) \le f(G)$ 或 $f(H) \ge f(G)$。
 
-Definition 2（节点单调函数）  
-设$\mathcal{G}_V$定义同 Definition 1，$f$输入为$\mathcal{G}_V$的图和V上任意一个点的为输入、分数为输出的一个函数，即$f:\mathcal{G}_V \rightarrow \mathbb{R}$。则$f$为单调函数当且仅当对于每个G，任何G的导出子图，均有：$f(H) \le f(G)$ 或 $f(H) \ge f(G)$。
+**Definition 2**（节点单调函数）  
+设$\mathcal{G}_V$定义同 Definition 1，$f$以$\mathcal{G}_V$的图和V上任意一个点的为输入、输出分数，即$f:\mathcal{G}_V \times V \rightarrow \mathbb{R}$。则$f$为单调函数当且仅当对于每个G，任何G的导出子图H，且任何H中的节点v，均有：$f(H,v) \le f(G,v)$ 或 $f(H,v) \ge f(G,v)$。
 
+对于某种性质（如图是否为二分图），我们可以用布尔函数函数，如$f(G) = 1$则G属于二分图，$f(G) = 0$则G不属于。
+
+对于图的一些测量值，有：  
+**Example 1** (Degree) 设 d(G,v)表示节点的度数，该函数节点单调。  
+**Example 2** (Minimum degree) 设 $f_m(G)$表示图中最小度节点的度数，该函数节点单调。（想象往H增边的过程，该过程点集不变）  
+**Example 3** (Distance) 设 $D_Q(G,v)和D_Q(G)$定义为之前所定义的距离，它们分别为节点单调函数、单调函数。
+
+**Definition 3** 设$f:\mathcal{G}_V \times V \rightarrow \mathbb{R}$，G最大化f 当且仅当 $min_{v\in V(G)} {f(G,v)} \ge min_{v\in V(H)} {f(H,v)}$ 
+
+现在定义一个一般化的社区搜索问题
+
+**Problem 3** （鸡尾酒派对，Cocktail party）$G=(V,E)$为无向图，$f:\mathcal{G}_V \times V \rightarrow \mathbb{R}$为节点非递增函数，$f_1, f_2, ..., f_k$为非递增属性。希望找到H，最大化$f$的同时满足$f_1, f_2, ..., f_k$。
+
+为了解决问题3，可以对Greedy算法进行推广，称为GREEDYGEN：  
+1. 从$G_0 = G$开始
+2. 查找是否有v，它会破坏某个属性条件，如果有，则删去该点及其所有邻居；否则，寻找所有节点中使$f(G,v)$的，把它删去。
+3. 不断重复步骤2。不断迭代直到所有节点都删除。
+4. 每一步记录图的分数，将分数最大的图返回。
+
+**Theorem 2** GREEDYGEN返回的图为问题3最优解。
+
+### 有大小约束的社区
+上一步算法的缺点是可能返回很大的子图。但若要设置距离约束，该算法为NP-hard难题。
+
+**Problem 4** (Minimum degree with upper bound on the size) $G=(V_G,E_G)$为无向图，$Q\Subset V$为查询节点，d为距离限制参数，k为大小限制参数。希望找到子图$H = (V_H, E_H)$，使得：  
+(i) H 包含 Q；  
+(ii) H连通；  
+(iii) $D_Q(H) \le d$；
+(iv) $|V_H| \le k$；
+(v) H拥有最大的最小节点。
+
+**Theorem 3** 问题4是 NP-hard难题。  
+PROOF. 现在希望将问题4规约到具有单位权重的斯坦纳树问题。该问题为NP-hard问题，其决策问题（Decision Problem）是，给定$G=(V,E)$，一组节点$T (T \subset V)$和一个整数k。要求找到G的一个子树，其包含T所有节点，且最多具有k条边。
+
+现定义问题4的决策版本：给定G，查询节点为T，节点数目上限是k+1，距离约束无限大，此时要找的图最小度至少为1。现在论证如果提坦纳树问题有解，我们问题也有，反之亦然。
+
+一方面，任何最多使用k条边的斯坦纳树也是我们问题的一个解（即斯坦纳问题有解，我们的问题肯定也有解），k条边最多使用k+1个节点，符合大小约束。另一方面，对于问题4的解H，其最多包含k+1个节点，只要获取H的任意生成树，其即为斯坦纳树问题的解。
+
+可以看出，即使去掉距离约束，问题也是NP-hard。
+
+在此处，会介绍两种启发式算法，寻找大小受限的社区。分别为GreedyDist和GreedyFast，前者着重优化质量，后者则是速度。
+
+#### GreedyDist
+对于距离界限d，设$f(G)=1$当G符合距离节点，可得$f(G) \ge f(H)$。其为一个布尔函数，可把距离界限看作图的属性。GreedyDist使用GreedyGen作为子程序，把距离界限作为属性之一。若GreedyGen返回的图不符合需求，则采用更严格的距离界限，直到大小满足约束 或 查询节点不再连通。对于后者，返回的图则为所有返回的图中最小的图。
+
+对d的范围调整也可以采用二分法进行查找以加快速度。
+
+#### GreedyFast
+该算法对图进行预处理，使得输入的图被限制在距离查询节点最近的$k^{'}$个节点内；$k^{'}$定义为使得结果连通且包含至少k个节点的最小值（没有说k如何寻找，猜测也是使用二分法）。
+
+算法会在预处理的图上进行GreedyGen。若忽略距离约束，算法可以更快。
 
 
