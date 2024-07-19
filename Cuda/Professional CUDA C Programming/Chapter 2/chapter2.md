@@ -236,7 +236,138 @@ nvprof获得的时间参数会比host统计的时间更加准确，host统计时
 我们可以将App的表现与理论限制相比。
 
 ## Organizing Parallel Threads
+这一章，我们将以各种形式的grid和block来对矩阵进行计算。此处，我们矩阵在内存中的表现实际上也是一个一维数组，一个$6 \times 8$的矩阵如图所示进行表示：
 
+![矩阵存储](./pic/3%20矩阵存储.png "矩阵存储")
+
+在之后展现的内核函数中，每一个线程通常只处理一个数据元素。一般，我们在kernel中需要处理得到的信息有：  
+* 线程索引和块索引
+* 数据点在矩阵中对应的坐标（表现为二元组）
+* 数据点在全局内存中（表现为一维数组）的存储位置  
+
+![block和grid与矩阵](./pic/4%20block和grid与矩阵.png "block和grid与矩阵")
+
+线程索引、块索引可分别用threadIdx、blockIdx来获取。数据点在矩阵中的坐标可以通过：  
+$ix = threadIdx.x + blockIdx.x * blockDim.x$  
+$iy = threadIdx.y + blockIdx.y * blockDim.y$   
+来获取，而全局内存的坐标，通过  
+$idx = ix + iy * nx$    
+进行计算，其中 nx 是矩阵每一行中元素个数
+
+### Summing Matrices with a 2D Grid and 2D Blocks
+
+当grid和block均为二维时，矩阵被划分的方式为前图所示，在kernel中对矩阵进行计算的代码可以为：
+``` c
+__global__ void sumMatrixOnGPU2D(float* MatA, float* MatB, float* MatC, const int nx, const int ny) {
+    unsigned int ix = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int iy = blockDim.y * blockIdx.y + threadIdx.y;
+    unsigned int idx = iy * nx + ix;
+
+    if (ix < nx && iy < ny) {
+        MatC[idx] = MatA[idx] + MatB[idx];
+    }
+}
+```
+通过对block进行调整，程序计算时间将会有所不同：
+```
+int dimx = 32;
+int dimy = 32;
+Using Device 0: NVIDIA GeForce GTX 1650
+Matrix size: nx 16384 ny 16384
+sumMatrixOnGPU2D <<<(512,512), (32,32)>>> elapsed 0.023089 sec
+
+int dimx = 32;
+int dimy = 16;
+Using Device 0: NVIDIA GeForce GTX 1650
+Matrix size: nx 16384 ny 16384
+sumMatrixOnGPU2D <<<(512,1024), (32,16)>>> elapsed 0.022963 sec
+
+int dimx = 16;
+int dimy = 16;
+Using Device 0: NVIDIA GeForce GTX 1650
+Matrix size: nx 16384 ny 16384
+sumMatrixOnGPU2D <<<(1024,1024), (16,16)>>> elapsed 0.022974 sec
+```
+结果组织为如下表格：
+|kernel配置|kernel计算时间|block数目|
+|:---:|:---:|:---:|
+|(32, 32)|0.023089 sec|512 x 512|
+|(32, 16)|0.022963 sec|512 x 1024|
+|(16, 16)|0.022974 sec|1024 x 1024|
+
+### Summing Matrices with a 1D Grid and 1D Blocks
+
+在这个情况下，block和grid的组织情况为(block_size, 1, 1)和(grid_size, 1, 1)。此时，对于block、grid在矩阵上的布局可以采取如图所示的策略：
+
+![1D blcok 1D grid和矩阵](./pic/5%201D%20blcok%201D%20grid和矩阵.png "1D blcok 1D grid和矩阵")
+
+每个线程处理ny（即一列）个数据，每个block处理的数据量即为block_size * ny个。此时，内核可以按如下方式编写：
+``` c
+__global__ void sumMatrixOnGPU1D(float* MatA, float* MatB, float* MatC, const int nx, const int ny) {
+    unsigned int ix = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (ix < nx) {
+        for (int iy = 0;iy < ny;++iy) {
+            int idx = iy*nx + ix;
+            MatC[idx] = MatA[idx] + MatB[idx];
+        }
+    }
+}
+```
+内核中，对于每一个ix，我们都算了对应的一列数据，一共ny个。
+调整其block大小，可以获得如下结果：
+``` 
+Using Device 0: NVIDIA GeForce GTX 1650
+Matrix size: nx 16384 ny 16384
+sumMatrixOnGPU1D <<<(512,1), (32,1)>>> elapsed 0.040942 sec
+
+Using Device 0: NVIDIA GeForce GTX 1650
+Matrix size: nx 16384 ny 16384
+sumMatrixOnGPU1D <<<(128,1), (128,1)>>> elapsed 0.039020 sec
+```
+
+### Summing Matrices with a 2D Grid and 1D Blocks
+相比于1D grid和1D block，grid多了y维度，在此处我们可以用来定位矩阵的y维度坐标。可以堪称这个y维度将上图中每个block中覆盖的矩阵的y维度进行切割。我们可以令grid.y = ny，这样每个block只会处理一行的一部分数据，如下图表示：
+
+![1D block 2D grid和矩阵](./pic/6%201D%20block%202D%20grid和矩阵.png "1D block 2D grid和矩阵")
+
+对应的kernel实现为：
+``` c
+__global__ void sumMatrixOnGPUMix(float* MatA, float* MatB, float* MatC, const int nx, const int ny) {
+    unsigned int ix = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int iy = blockIdx.y;
+    unsigned int idx = iy * nx + ix;
+
+    if (ix < nx && iy < ny) {
+        MatC[idx] = MatA[idx] + MatB[idx];
+    }
+}
+```
+调整其kernel配置，获得的运行速度如下所示：
+```
+Using Device 0: NVIDIA GeForce GTX 1650
+Matrix size: nx 16384 ny 16384
+sumMatrixOnGPUMix <<<(512,16384), (32,1)>>> elapsed 0.030278 sec
+
+Using Device 0: NVIDIA GeForce GTX 1650
+Matrix size: nx 16384 ny 16384
+sumMatrixOnGPUMix <<<(64,16384), (256,1)>>> elapsed 0.022409 sec
+```
+
+统计一下，每种block、grid组织方式，在我们进行的配置中，最好的运行时间和对应的配置如下表所示：
+
+|内核|运行配置|时间|
+|:---:|:---:|:---:|
+|sumMatrixOnGPU1D|(512,1024), (32,16)|0.022963 sec|
+|sumMatrixOnGPU1D|(128,1), (128,1)|0.039020 sec|
+|sumMatrixOnGPU1D|(64,16384), (256,1)|0.022409 sec|
+
+从中我们可以发现：
+* 改变配置会影响运行表现
+* 只有简单的内核运行（没有对配置进行探究）常常不会有最好的运行效果
+* 对于一个给定的内核，尝试不同维度的grid和block会找到更好的表现
+
+## Managing Devices
 
 
 
