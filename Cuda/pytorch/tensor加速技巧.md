@@ -16,6 +16,12 @@ Tensor.cuda(device=None, non_blocking=False, memory_format=torch.preserve_format
 
 要实现data异步传输到CUDA，可以设置non_blocking为True。注意，只有tensor存储于pinned memory上，该设置才能生效。设置后，复制过程相对于host将会是异步执行。
 
+但要注意，这个操作无法重叠计算和传输过程。
+
+### 重叠传输和计算
+利用torch.
+
+### 利用pytorch.profiler进行profile
 
 
 
