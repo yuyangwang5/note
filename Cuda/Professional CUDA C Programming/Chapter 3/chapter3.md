@@ -61,5 +61,46 @@ Fermi有一个关键特性，它有64KB的片上可配置内存，它会被分�
 
 Fermi还支持并发内核执行：同一个应用程序上下文中，可以启动的多个内核，使其同时在同一GPU上运行。Fermi可最多支持16个内核同时运行。
 
-## Understanding the Nature of Warp Execution
+### Kepler架构
+Kepler架构拥有15个SM和6个64位内存控制器。在Kepler上有三个创新：
+* SM增强
+* 动态并行
+* Hyper-Q
 
+其架构如下图所示：
+![Kepler架构](./pic/5%20Kepler架构.png "Kepler架构")
+
+Kepler SM包含192个单精度CUDA核、64个双精度单元、32个特殊函数单元和32个加载/存储单元。每个SM包含4个调度器和8个分派器，由此在一个SM中，可以同时运行4个Warp。在Kepler K20X(计算能力3.5)架构中，每个SM可以接收64个warp，即可以同时存储2048个线程。K20X架构将寄存器文件的大小增加到了64K（Fermi只有32K）。K20X在共享内存和L1缓存之间可以进行更多的内存划分（这应该是可以使共享内存和L1之间的比例调整更加细致）。K20X如下图所示：
+![Kepler SM](./pic/6%20Kepler%20SM.png "Kepler SM")
+
+
+动态并行（Dynamic Parallelism）意思是GPU可以动态启动新的网格。若没有动态并行，要启动内核函数必须要通过host，而有了动态并行之后，GPU就可以嵌套执行内核了，这样就消除了与CPU之间的交流开销。该特色带来的裨益如下图所示：
+![动态并行](./pic/7%20动态并行.png "动态并行")
+
+Hyper-Q在CPU和GPU之间增加了更多的硬件连接，如下图所示。由此，CPU核就可以同时调用多个GPU任务，更多任务可以在GPU运行。这可以增加GPU利用率，减少CPU的等待时间。在Fermi中，GPU与CPU之间只有一个硬件工作队列（hardware work queue）来传输任务，由此可能导致单个任务阻塞所有的任务。而Kepler提供了32个硬件工作队列，增强了GPU的并行性。
+![Hyper-Q](./pic/8%20Hyper-Q.png "Hyper-Q")
+
+### profile驱动的优化（Profile-Driven Optimization）
+profiling会对程序进行分析，它会分析：
+* 时/空间复杂度
+* 特殊指令的使用
+* 函数调用的频率和时长  
+
+profile驱动的优化对于CUDA编程很重要，原因如下：
+* 最简单的kernal实现表现并不会很好，profile可以帮助找到代码瓶颈。
+* CUDA会划分SM中的资源给线程块。这种划分导致某些资源限制了表现。profiling工具可以获取资源利用信息。
+* CUDA提供了硬件架构的抽象，由此我们可以控制线程同步。profiling工具可以帮助我们测量（相关数据）、（对相关数据）可视化，帮助我们找到可优化点。
+
+CUDA提供了两个profiling工具：nvvp，可视化profiler；和nvprof，命令行profiler
+
+在CUDA profiling中，事件（event）是一个可计数活动，它对应于一个硬件技术器，且会在kernel执行时被搜集。一些概念：
+* 多数计数器所记录的信息是针对单个SM，而非整个GPU。
+* 若只运行一次，只会搜集到少数计数器。有些计数器是互斥的（可能指的是运行一次，得到某个计数器的同时，与之互斥的计数器得不到），由此要运行多次才可以得到所有相关计数器。
+* 由于GPU执行时的不确定性（如线程块分配顺序、warp调用顺序），多次运行时计数器的值不会相同。
+
+有三个常见的kernel性能表现限制：
+* 内存带宽
+* 计算资源
+* 指令、内存延迟
+
+## Understanding the Nature of Warp Execution
