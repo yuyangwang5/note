@@ -138,4 +138,48 @@ $$f(v) = deg_{G[C \cup \{v\}]}(v)$$
 
 还有一种优化方式，若用邻接列表存储每个节点的邻居，可以依照度数对邻居进行从大到小排序，再加入节点时，一旦出现邻居度数小于k，就可以立马终止对邻居的遍历操作。
 
-### CSM的局部搜搜
+### CSM的局部搜索
+不同于之前介绍的重复CST来寻找CSM，这里要介绍另一种方法。该算法有三步：
+1. 扩展搜索空间；
+2. 在搜索空间中生成候选集；
+3. 调用maxcore方法在候选集中寻找答案。
+
+其算法流程如下图所示：
+![A local-search framework to solve CSM](./local_search_pic/6%20Algorithm%204.png "A local-search framework to solve CSM")
+
+首先先来关注扩展搜索空间。目标是在线性成本下仅可能移除节点，且寻找子集H，使得$\delta(G[H])$仅可能大。算法中，H表示已经找到的最好的解决方案；A表示的是已经访问过的节点；B表示可以访问但还未访问的节点。s表示的是从上一次H更新后，经历过的迭代数。s存在的上限之后证明。我们使用li方法（连接数最大）来从B中选择要添加的节点v。若A比H更优，则更新H。在更新B时，只有v的邻居中度数大于$\delta(G[H])$的节点才会被加入B。
+
+之前已经证明，对于连通图，其最大核存在上限；即：
+$$ m^*(G, v) \le \lfloor \frac{1 + \sqrt{9+8(|E|-|V|)}}{2} \rfloor $$
+所以，当我们寻找到的H满足：
+$$\delta (H) = min \{ deg_G(v_0),  \lfloor \frac{1 + \sqrt{9+8(|E|-|V|)}}{2} \rfloor \}$$
+时，就可以确定找到了最优解，可以直接将H返回。
+
+然而，如果在扩展A的时候，将一个无效节点引入，则H永远不会达到上界。为此，引入了另一个上界，即对s的约束：
+
+**THEOREM 5** G为连通图，H是CST(k)的一个解，有：
+$$|H| \le \lfloor \frac{|E| - |V|}{k/2-1} \rfloor$$
+
+**PROOF** G连通，所以$|E| \ge |V| - 1$。以及，G[H]至少有k|H|/2条边。由此有$k|H|/2 + |V| - |H| \le |E|$。整理可得上式。
+
+**COROLLARY 1** 设G为连通图，H为目前算法4找到的最优解。若存在$H \subset H'$使得$\delta (G[H']) = \delta (G[H]) + 1$，我们需要加的点数最多为：
+$$\lfloor \frac{|E| - |V|}{(\delta (G[H]) + 1)/2-1} \rfloor - |H|$$
+
+当然，前提是所有加入的点都是准确的（不会加入无效点）。
+
+推论1可见，k越大，该上界越紧。鉴于该上界，使用s和$\gamma$来控制搜索空间：
+$$s \le e^{-\gamma} (\lfloor \frac{|E| - |V|}{(\delta (G[H]) + 1)/2-1} \rfloor - |H|)$$
+其中$-\infin \lt \gamma \lt \infin$ 用于控制搜索空间大小。
+
+现在我们来关注候选集的生成。我们将通过H生成候选集。设$C_{naive}(k)为算法3的返回方案（移除所有度数小于k的节点）
+
+方案1：C <- A。这种情况下，有以下结果：  
+**THEOREM 6** 给定图G和查询顶点$v_0$，当$\gamma \rightarrow -\infin$，算法4可以为CSM找到一个最优解。   
+**PROOF** 设$k = \delta(G[H])$，显然有$m^*(G, v_0) \ge k$。$\gamma \rightarrow -\infin$相当于对s不设限，由此有$C_{naive}(k) \subseteq A$。进一步，有$C_{naive}(m^*(G, v_0)) \subseteq A$，由此$maxcore(G[A], v_0)$可以得到最优解。  
+在该方案下，对于$\gamma$，其越接近$-\infin$，解决方案质量越高；而越接近$\infin$，可达到更好性能。
+
+方案1：$C \leftarrow C_{naive}(k)$，此时$k = \delta(G[H])$。这种情况下，有以下结果： 
+**THEOREM 6** 给定图G和查询顶点$v_0$，算法4永远可以找到最优解。  
+**PROOF** 对于任何$k <= m^*(G,v_0)$，$C_{naive}(k)$包含所有有效顶点。而$k = \delta(G[H])$，满足$k <= m^*(G,v_0)$，由此maxcore函数可以找到最优解。  
+这种情况下$\gamma$不影响解的质量，但运行时间会较大。
+

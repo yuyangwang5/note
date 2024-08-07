@@ -104,3 +104,130 @@ CUDA提供了两个profiling工具：nvvp，可视化profiler；和nvprof，命�
 * 指令、内存延迟
 
 ## Understanding the Nature of Warp Execution
+
+### Warps and Thread Blocks
+Warp是SM最基础的执行单元。一旦有线程块被分配到某个SM，该线程块中的线程会被分为warps。每个warp有32个（标号）连续的线程组成，且线程块中的线程会以SIMT的方式执行，即所有线程都会执行相同的指令，不过需要注意的是每个线程不一定处理相同的数据，它们可以有自己的数据。
+
+每个block可以有1维、2维或3维，但从硬件角度上看，所有线程都是一维的。  
+对于一维block，在一个warp中，线程的threadIdx.x是连续的。而对于二维或三维，它们的逻辑布局可以被转为一维的物理布局。如，对于2D线程块，块中每个线程的ID可以为：
+$$threadIdx.y * blockDim.x + threadIdx.x$$
+
+3维可以为：
+
+$$threadIdx.z * blockIdx.y * blockIdx.x + threadIdx.y * blockDim.x + threadIdx.x$$
+
+对于每个block的warps数，可以表示为：
+
+$$WarpsPerBlock = \frac{ThreadsPerBlock}{warpSize}$$
+
+因此，在硬件层面上，对于每一个块，分配的warp数是一致的。warp不会被不同的block区分（即不会一部分warp属于block，另一部分属于另一个block）。如果块大小不能被warp的大小整除，那么在最后一个warp中，会有线程不被激活。如下图所示：
+![block分为warp](./pic/9%20block分为warp.png "block分为warp")
+
+在图中，block中有80个线程，它被分为3个warp，最后一个warp中会有部分线程失活。
+
+### Warp分歧，Warp Divergence
+GPU没有复杂的分支预测机制。在一个时钟周期中，warp中所有线程必须执行同一个指令。如此，在执行中，若warp中线程要执行不同的指令会带来问题，这被称为warp divergence（warp分歧）。在warp分歧中，warp会有序执行每一个分支，且在执行某个分支时，会让没有执行该分支的线程失活。warp分支会导致程序执行表现的退化。
+![warp divergece](./pic/10%20warp%20divergece.png "warp divergece")
+
+由此，我们需要仅可能避免相同warp中存在不用的执行路径。由于对于thread而言，warp的分配实际上是确定的，由此可以尽可能在划分数据，使得在相同warp上的线程有相同的控制流。
+
+有以下两个kernel：
+``` c
+__global__ void mathKernel1(float *c) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float a, b;
+    a = b = 0.0f;
+
+    if (tid % 2 == 0) {
+        a = 100.f;
+    } else {
+        b = 200.f;
+    }
+    c[tid] = a+b;
+}
+
+__global__ void mathKernel2(float *c) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float a, b;
+    a = b = 0.0f;
+    if ((tid / warpSize) % 2 == 0) {
+        a = 100.f;
+    } else {
+        b = 200.f;
+    }
+    c[tid] = a+b;
+}
+```
+
+在文中，作者利用nvprof工具对两个kernel进行profile，获取branch_efficiency特性。关于branch_efficiency，其计算公式为：
+$$ Branch Efficiency = 100 \times \frac{\# Branches - \# Divergent Branches}{\#Branches} $$
+而对两个kernel进行profile，发现两者均没有warp分歧出现（Branch Efficiency均为100%）。这是因为CUDA编译器进行了优化，将分支指令换成了条件指令，使得程序不是跳转（如此，程序执行路径会有多条，导致控制流发散），而是“满足某种条件而执行”，使得所有线程执行相同的指令。这中优化适用于短小的条件代码段。
+
+在分支预测中，每个线程都有一个变量（谓词变量，predicate variable），类型为bool，可以依据条件被设置为1或0。由此，两个分支的控制流都会被执行，但只有变量为1对应线程的指令会被执行。若为0，线程并不执行，但也不会被阻塞。只有当条件语句体的指令少于某个阈值时，编译器才会将分支指令换为谓词指令（predicated instructions）。对于长代码路径，还是会有warp分歧出现。
+
+第三个kernel：
+``` c
+__global__ void mathKernel3(float *c) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float a, b;
+    a = b = 0.0f;
+
+    bool ipred = (tid % 2 == 0);
+
+    if (ipred) {
+        a = 100.f;
+    } 
+    if (!ipred) {
+        b = 200.f;
+    }
+    c[tid] = a+b;
+}
+```
+（据说这个程序直接暴露了分支预测，不太清楚原理）  
+
+可以在编译时取消优化内核函数。这时书上结果为：
+```
+mathKernel1: Branch Efficiency 83.33% 
+mathKernel2: Branch Efficiency 100.00%
+mathKernel3: Branch Efficiency 71.43%
+```
+可以看见CUDA还是有实现少许优化，使得kernel1和kernel3的分支效率有50%以上。
+
+### Resource Partition
+warp的本地执行上下文主要包括以下资源：
+* 程序计数器
+* 寄存器
+* 共享内存
+
+在warp的整个生命周期，其执行上下文都在片上（on-chip）。每个SM都有32位的寄存器集，它们存储于寄存器文件上，寄存器文件会被线程划分。共享内存的大小固定，它会被线程块瓜分。可以同时存储于SM的线程块和warp数是受限的，决定因素有：寄存器数；SM上可用共享内存数；kernel所要求的资源数。
+
+![寄存器资源](./pic/11%20寄存器资源.png "寄存器资源")
+上图展示了寄存器资源被线程消耗的情况。线程所需要的寄存器越多，能在SM上存储的warp越少。
+
+![共享内存资源](./pic/12%20共享内存资源.png "共享内存资源")
+上图展示了共享内存资源被线程块消耗的情况。若线程块占用过多的共享内存，那么能同时放进SM的线程块就会变少。
+
+如果没有足够的寄存器或共享内存可以达到一个block的要求，那么kernel就会启动失败。
+
+当计算资源（如寄存器、共享内存）被分配到某个线程块时，该块就是活跃块（active block），而其中的线程就叫做活跃warp（active warp）。活跃warp可以被进一步分为：
+* 选中warp，Selected warp
+* 阻塞warp，Stalled warp
+* 待选warp， Eligible warp
+
+warp调度器每个周期会活跃的warp并将它们分派到执行单元。正在执行的warp为 选中warp，若warp已经可以执行但还没有执行，就是 待选warp，warp还未满足执行条件则为 阻塞warp。warp可以被执行当且仅当：
+* 32的CUDA核可以用于执行；
+* 指令所需的参数已经准备好（这个准备没有直观的认知）
+
+除此还存在硬件上的一些限制。例如，对于Kepler，一个SM从启动到结束，活跃warp数不能超过64个。任何周期 选中warp 数不能多余4个。如果warp被阻塞，warp调度器会选取待选warp将其换走。
+
+CUDA编程中，需要注意对计算资源的划分，这会限制活跃warp的数目。为了最大化GPU的利用率，我们需要最大化活跃warp的数目。
+
+### Latency Hiding
+
+## Exposing Parallelism
+
+
+
