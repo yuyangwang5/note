@@ -22,5 +22,7 @@
 
 Graphie确保仅传输激活的分区，但是如果激活的分区已经在GPU内存内了，可能发生冗余传输。由于命令队列为FIFO，关键是在处理它们之前不要覆盖掉他们。由此，Graphie会优先处理已经激活且驻留于GPU内存中的分区来解决这个问题。对于这样的分区，Graphie仅会将内核调用命令插入到上一轮迭代中处理该分区的队列中。
 
-## 
-
+kernel = SourceModule(...)#利用pycuda编写cuda算子
+func = kernel.get_function(函数名) #获取pycuda编写的算子
+segment_csr(...) #torch_scatter算子
+func(...) #运行函数。会报错pycuda._driver.LogicError: cuFuncSetBlockShape failed: invalid resource handle
