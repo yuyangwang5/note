@@ -337,5 +337,111 @@ block同步会强迫warp空闲，对性能有负面影响。
 
 ## Exposing Parallelism
 
-## 
+在该节中，我们将使用各种grid、block参数来运行以下程序：
+
+``` c
+__global__ void sumMatrixOnGPU2D(float *A, float *B, float *C, int NX, int NY) {
+    unsigned int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int idx = ix + iy * NX;
+
+    if (ix < NX && iy < NY) {
+        C[idx] = A[idx] + B[idx];
+    }
+}
+```
+
+### 检查active warps和Memory Operations
+
+首先我们需要创建参考结果，作为性能的基准。我们首先使用(32, 32), (16,32),(32,16),(16,16)的block大小进行测试，并且用Nsight Compute获取到kernel的Achieved Occupancy、Memory Thoughtput(与理论值峰值相比)、Memory Throughput（传输速度）。
+```
+./sumMatrix 32 32
+sumMatrixOnGPU2D <<<(512,512), (32,32)>>> elapsed 26.98 ms
+sumMatrixOnGPU2D <<<(512,512), (32,32)>>> Achieved Occuancy 87.59 %
+sumMatrixOnGPU2D <<<(512,512), (32,32)>>> Memory Throughput 119.47 GB/s
+sumMatrixOnGPU2D <<<(512,512), (32,32)>>> Memory Throughput 74.75 %
+
+./sumMatrix 32 16
+sumMatrixOnGPU2D <<<(512,1024), (32,16)>>> elapsed 23.96 ms
+sumMatrixOnGPU2D <<<(512,1024), (32,16)>>> Achieved Occuancy 80.40 %
+sumMatrixOnGPU2D <<<(512,1024), (32,16)>>> Memory Throughput 134.54 GB/s
+sumMatrixOnGPU2D <<<(512,1024), (32,16)>>> Memory Throughput 84.24 %
+
+./sumMatrix 16 32
+sumMatrixOnGPU2D <<<(1024,512), (16,32)>>> elapsed 25.39 ms
+sumMatrixOnGPU2D <<<(1024,512), (16,32)>>> Achieved Occuancy 79.83 %
+sumMatrixOnGPU2D <<<(1024,512), (16,32)>>> Memory Throughput 126.89 GB/s
+sumMatrixOnGPU2D <<<(1024,512), (16,32)>>> Memory Throughput 79.40 %
+
+./sumMatrix 16 16
+sumMatrixOnGPU2D <<<(1024,1024), (16,16)>>> elapsed 24.32 ms
+sumMatrixOnGPU2D <<<(1024,1024), (16,16)>>> Achieved Occuancy 83.59 %
+sumMatrixOnGPU2D <<<(1024,1024), (16,16)>>> Memory Throughput 132.57 GB/s
+sumMatrixOnGPU2D <<<(1024,1024), (16,16)>>> Memory Throughput 82.94 %
+*/
+```
+
+比较结果，我们发现在(32,16)的大小中达到了峰值。对achieved occupancy（平均每个周期活跃的warp与SM可支持的warp最大值的比值）进行分析，发现占比并没有像教材一样有从小到达增长的趋势。教材对它所观察到的结果进行分析：
+* 有更多block数，可以拥有更多active warps；
+* 运行速度不单单受到achieved occupancy的影响。
+
+在我们实现的kernel中，哟三个memory操作，两个为load一个为store。对于throughput进行测量，我们可以发现更大吞吐并不一定与有更快的速度（然而在本地上测量，反而存在吞吐和运行速度的正相关关系）。书上还测量了Memory带宽使用情况（请求的全局load吞吐与所需的全局load吞吐的比值）。发现即使吞吐更大，也不一定带来更高的带宽利用率。对于配置(16, 32)和(16,16)，他们的x值为16，这不符了希望最内部的维度为32的倍数的建议。
+
+### Exposing More Parallelism
+到现在，我们知道x维度必须必须为32的倍数。然而我们还会好奇：
+* 通过调整x能否进一步提高load throughput？
+* 是否能够暴露更多的并行性？
+
+由此，我们对更多的配置进行了实验：
+```
+./sumMatrix 64 1
+elapsed 22.43 ms        Achieved Occuancy 78.32 %
+
+./sumMatrix 64 2
+elapsed 22.24 ms        Achieved Occuancy 84.52 %
+
+./sumMatrix 64 4
+elapsed 23.80 ms        Achieved Occuancy 84.21 %
+
+./sumMatrix 64 8
+elapsed 23.44 ms        Achieved Occuancy 81.50 %
+
+./sumMatrix 128 1
+elapsed 21.85 ms        Achieved Occuancy 85.32 %
+
+./sumMatrix 128 2
+elapsed 22.37 ms        Achieved Occuancy 82.74 %
+
+./sumMatrix 128 4
+elapsed 24.25 ms        Achieved Occuancy 81.06 %
+
+./sumMatrix 128 8
+elapsed 25.75 ms        Achieved Occuancy 89.25 %
+
+./sumMatrix 256 1
+elapsed 21.88 ms        Achieved Occuancy 84.79 %
+
+./sumMatrix 256 2
+elapsed 22.89 ms        Achieved Occuancy 79.21 %
+
+./sumMatrix 256 4
+elapsed 26.64 ms        Achieved Occuancy 85.83 %
+```
+
+先排除y维度为1的配置，发现最好的配置为(64,2)，也与教材上的结果不相同。
+
+(64,2)暴露的并行最多。然而进一步暴露并行性(64,1)，效果反而更差了，由此可见并非越多block，速度越快。但是暴漏并行性依旧是很重要的一个优化性能的方式。
+
+(64, 4)和(128, 2)有相同的block数，然而(128, 2)会更快，教材上总结是x维度起到关键作用（但是对于(64, 8)和(128, 4)，是(64,8)更快）。
+
+对于achieved occupancy的测量结果，也与教材有所不同。暴露了足够多的并行性但achieved occupancy比较低，这是由于对于块数量的硬件限制。
+
+将y维度置为1时，(128,1)最快，但占用率和吞吐它都不是最快的。为了得到最好的配置，我们需要去平衡各种相关指标。
+
+
+
+
+
+
+
 
