@@ -438,8 +438,156 @@ elapsed 26.64 ms        Achieved Occuancy 85.83 %
 
 将y维度置为1时，(128,1)最快，但占用率和吞吐它都不是最快的。为了得到最好的配置，我们需要去平衡各种相关指标。
 
+## 避免bracnch分支 Avoiding Branch Divergence
 
+线程的下标会影响控制流，由此会出现warp分歧(warp divergence)，导致kernel运行性能下降。本节通过并行规约问题对warp分歧进行研究。
 
+### 并行规约问题 The Parallel Reduction Problem
+
+假设由N个整型元素组成的数组，现在需要把它们加在一起。若希望使用并行加法，我们需要考虑：
+1. 把数组分成多个更小的块(chunk)；
+2. 为每个块分配一个线程，由该线程去计算块的结果；
+3. 将每个块的结果进行相加，得到最终结果。
+
+一种方法是，令每个chunk只有两个元素，每个线程将两个元素相加，得到部分结果(partial result)，该结果将原地存储，并且在下一次迭代作为输入。
+
+该方法根据结果存储的位置可以分为两种：
+1. 邻近对(Neighbored pair)，线程处理的两个元素为邻居；
+2. 交错对(Interleaved pair)，线程处理的两个元素之间会相隔固定数目个元素。
+
+这两类方法由下图所示，3-19为邻近对，3-20为交错对：
+
+![规约问题计算方法](./pic/17%20规约问题计算方法.png "规约问题计算方法")
+
+实际上，不只是加法操作，只要操作满足交换律和结合律（如最大值、乘法），就可以算作规约问题。
+
+### 并行规约中的分歧 Divergence in Parallel Reduction
+
+首先我们先关注Neighbor pair，并以下图的方式实现该kernel：
+
+![Neighbored pair 1](./pic/18%20Neighbored%20pair%201.png "Neighbored pair 1")
+
+对应的代码片段为：
+
+``` c
+__global__ void reduceNeigbored(int *g_idata, int *g_odata, unsigned int n) {
+
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockDim.x * blockIdx.x + tid;
+
+    int *idata = g_idata + blockDim.x * blockIdx.x;
+
+    if (idx >= n) return;
+
+    for (int stride = 1; stride < blockDim.x; stride *= 2) {
+        if ((tid % (2*stride)) == 0) {
+            idata[tid] += idata[tid + stride];
+        }
+
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        g_odata[blockIdx.x] = idata[0];
+    }
+}
+```
+
+在该kernel中，每个线程块负责计算一个块，__syncthreads用于保证下一次迭代前每个线程已经计算完并将计算数据原地存储完成了。该kernel计算结束后，会将部分结果(partial result)传回给cpu，计算最终结果。
+
+### 改进规约计算中的分歧 Improving Divergebce in Parallel Reduction
+
+在上面实现的kernel中，可以发现：
+
+``if ((tid % (2*stride)) == 0) ``
+
+随着stride增大，代码块中实际运行的线程越少，且它们的x维度坐标差距也越大。如第一轮迭代，stride=1，只有tid为奇数的线程才工作；而第二轮迭代，stride=2，此时只有tid能被4整除的线程才能工作。由此，每一轮迭代，所有的warp都存在线程被激活，但warp并非所有线程都需要工作，而且需要工作的warp在线程中的占比随着迭代数目的增加越来越低。
+
+对于以上提及的问题，可以通过重新安排工作线程下标，使得邻居线程进行加法操作，来解决。如下图所示：
+
+![Neighbored pair 2](./pic/19%20Neighbored%20pair%202.png "Neighbored pair 2")
+
+对应的代码为：
+
+``` c
+__global__ void reduceNeigboredLess(int *g_idata, int *g_odata, unsigned int n) {
+
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockDim.x * blockIdx.x + tid;
+
+    int *idata = g_idata + blockDim.x * blockIdx.x;
+
+    if (idx >= n) return;
+
+    for (int stride = 1; stride < blockDim.x; stride *= 2) {
+        int index = 2*stride*tid;
+        if (index < blockDim.x) {
+            idata[index] += idata[index + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        g_odata[blockIdx.x] = idata[0];
+    }
+}
+```
+
+当block大小为512时，第一轮迭代仅有前8个warp会执行，剩下8个warp什么都不做；第二轮时仅剩下4个。此时不存在warp分歧。不断迭代直到工作的线程小于32时，分歧才会出现。
+
+### 用交错对方式进行规约 Reducing with Interleaved Pairs
+
+交错对实现中，每轮迭代的工作线程tid与邻居对的第二种实现实现相同，然而每个线程在全局内存的加载/存储位置不同。该方法的实现如下图所示：
+
+![Interleaved pair](./pic/20%20Interleaved%20pair.png "Interleaved pair")
+
+kernel代码如下所示：
+
+``` cpp
+__global__ void reduceInterleaved(int *g_idata, int *g_odata, unsigned int n) {
+
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockDim.x * blockIdx.x + tid;
+
+    int *idata = g_idata + blockDim.x * blockIdx.x;
+
+    if (idx >= n) return;
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            idata[tid] += idata[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        g_odata[blockIdx.x] = idata[0];
+    }
+}
+```
+
+在GTX 1650上运行，结果如下：
+
+```
+gpu Neighbored elapsed 3.60 ms gpu_sum: 2139353471 <<<grid 32768 block 512>>>
+    Avg. Active Threads Per Warp    27.17/32
+    Memory Throughput   37.6 GB/s
+    Executed Instructions    121,634,816
+
+gpu NeighboredL elapsed 2.80 ms gpu_sum: 2139353471 <<<grid 32768 block 512>>>
+    Avg. Active Threads Per Warp    26.93/32
+    Memory Throughput   48.35 GB/s
+    Executed Instructions    62,914,560
+
+gpu Interleaved elapsed 2.30 ms gpu_sum: 2139353471 <<<grid 32768 block 512>>>
+    Avg. Active Threads Per Warp    26.86/32
+    Memory Throughput   44.30 GB/s
+    Executed Instructions    55,574,528
+```
+
+可以发现，三个kernel速度不断加快。然而在对Avg. Active Threads Per Warp进行测试时，发现数值差不多，不知道算不算选错数据；对于Memory Throughput，工作线程下标邻近的kernel会比不邻近时高很多，然而Interleaved pair会比Neighbored pair少；执行的指令数目，工作线程下标邻近的kernel会比不邻近时少很多，Interleaved pair最少。
+
+对于第一个现象，猜测它指标并不完全和warp分歧对应，但现在也没找到真正体现warp分歧的指标；第二个原因不清楚；第三个，对于邻近线程实现指令少，应该是减少了活跃warp，可以少一些warp的计算，而对于为什么Interleaved pair最少也还无法解释。
 
 
 
