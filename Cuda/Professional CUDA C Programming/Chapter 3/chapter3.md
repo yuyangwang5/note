@@ -589,7 +589,318 @@ gpu Interleaved elapsed 2.30 ms gpu_sum: 2139353471 <<<grid 32768 block 512>>>
 
 对于第一个现象，猜测它指标并不完全和warp分歧对应，但现在也没找到真正体现warp分歧的指标；第二个原因不清楚；第三个，对于邻近线程实现指令少，应该是减少了活跃warp，可以少一些warp的计算，而对于为什么Interleaved pair最少也还无法解释。
 
+## 循环展开 UNROLLING LOOPS
 
+循环展开，即通过减少分支和循环指令频率来优化循环。循环展开的思想是，与其写一遍循环体然后不断重复执行，不如将循环体多执行写几次以减少循环次数。循环体重复编写的次数称为循环展开因子(loop unrolling factor)，最后实现的循环迭代次数会由最初没有复制循环体的次数除以该循环展开因子得到。对于迭代次数已知且需要顺序处理的数组循环，循环展开可以显著提升性能。
+
+现在先编写一个循环体，且不使用循环展开技术：
+
+``` c
+for (int i = 0; i < 100; i++) {
+    a[i] = b[i] + c[i];
+}
+```
+
+若将循环体复制一次，迭代数会变为原来的一半：
+
+``` c
+for (int i = 0; i < 100; i+=2) {
+    a[i] = b[i] + c[i];
+    a[i+1] = b[i+1] + c[i+1];
+}
+```
+
+这种性能提升的原因从高层代码中看不出来，其来自于底层指令的优化。对CUDA代码进行展开优化有各种各样的做法，但目标是一致的：通过减少指令开销、增加独立指令以加速程序。
+
+### 带展开优化的规约 Reducing with Unrolling
+
+在reduceInterleaved内核中，每个线程块分配一个数据块进行规约。我们对此进行修改，相比于之前的代码，每个线程块会分配两个数据块进行规约。如此，得到内核reduceUnrolling2：
+
+``` c
+__global__ void reduceUnrolling2(int *g_idata, int *g_odata, unsigned int n) {
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockDim.x * blockIdx.x * 2 + tid;
+
+    int *idata = g_idata + blockDim.x * blockIdx.x * 2;
+
+    if (idx + blockDim.x < n) g_idata[idx] += g_idata[idx + blockDim.x];
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            idata[tid] += idata[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        g_odata[blockIdx.x] = idata[0];
+    }
+}
+```
+
+![loop unrolling](./pic/21%20loop%20unrolling.png "loop unrolling")
+
+以上图为例进行说明。未进行循环展开时，每个线程块仅负责其中一个block；而以上面kernel方式循环展开后，每个线程块负责两个block。在 `if (idx + blockDim.x < n) g_idata[idx] += g_idata[idx + blockDim.x];`，线程块会将相邻的两个block进行处理，把block i[tid]和block i+1[tid]相加并存于block i[tid]中。之后只要对block i中的元素进行规约，就等于对两个block都进行规约了。
+
+同理，也可以编写reduceUnrolling4和reduceUnrolling8。经实验，结果如下：
+
+```
+gpu Interleaved elapsed 3.02 ms gpu_sum: 2139353471 <<<grid 32768 block 512>>>
+    Memory Throughtput 37.91%
+gpu Unrolling2 elapsed 1.66 ms gpu_sum: 2139353471 <<<grid 16384 block 512>>>
+    Memory Throughtput 41.32%
+gpu Unrolling4 elapsed 0.90 ms gpu_sum: 2139353471 <<<grid 8192 block 512>>>
+    Memory Throughtput 58.33%
+gpu Unrolling8 elapsed 0.55 ms gpu_sum: 2139353471 <<<grid 4096 block 512>>>
+    Memory Throughtput 86.26%
+```
+
+改进后，一个线程会有更多独立的内存加载/存储指令，内存延迟可以被更好地隐藏。
+
+### 将warp展开的规约 Reducing with Unrolled Warps
+
+_syncthreads用于块内线程同步。不过，当一个线程块中的线程不大于32个时，由于warp指令执行为SIMT的方式，warp内部都会隐式地进行同步。最后的循环可以被展开为：
+
+``` c
+if (tid < 32) {
+    volatile int *vmem = idata;
+    vmem[tid] += vmem[tid + 32];
+    vmem[tid] += vmem[tid + 16];
+    vmem[tid] += vmem[tid + 8];
+    vmem[tid] += vmem[tid + 4];
+    vmem[tid] += vmem[tid + 2];
+    vmem[tid] += vmem[tid + 1];
+}
+```
+
+如此，可以避免循环控制和块内线程同步带来的开销。
+
+vmem使用了volatile标识符，该标识符告诉编译器一定要将vmem[tid]存回全局内存。如果没有volatile标识符，由于编译器或缓存可能会优化掉对全局内存或共享内存的读写操作，这段代码将不会正确执行。由此，对于内核 reduceUnrolling8，我们进行修改：
+
+``` c
+__global__ void reduceCompleteUnrollWarps8 (int *g_idata, int *g_odata, unsigned int n)
+{
+    // set thread ID
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x * 8 + threadIdx.x;
+
+    // convert global data pointer to the local pointer of this block
+    int *idata = g_idata + blockIdx.x * blockDim.x * 8;
+
+    // unrolling 8
+    if (idx + 7 * blockDim.x < n)
+    {
+        int a1 = g_idata[idx];
+        int a2 = g_idata[idx + blockDim.x];
+        int a3 = g_idata[idx + 2 * blockDim.x];
+        int a4 = g_idata[idx + 3 * blockDim.x];
+        int b1 = g_idata[idx + 4 * blockDim.x];
+        int b2 = g_idata[idx + 5 * blockDim.x];
+        int b3 = g_idata[idx + 6 * blockDim.x];
+        int b4 = g_idata[idx + 7 * blockDim.x];
+        g_idata[idx] = a1 + a2 + a3 + a4 + b1 + b2 + b3 + b4;
+    }
+
+    __syncthreads();
+
+    // in-place reduction in global memory
+    if (blockDim.x >= 1024 && tid < 512) idata[tid] += idata[tid + 512];
+    __syncthreads();
+    if (blockDim.x >= 512 && tid < 256) idata[tid] += idata[tid + 256];
+    __syncthreads();
+    if (blockDim.x >= 256 && tid < 128) idata[tid] += idata[tid + 128];
+    __syncthreads();
+    if (blockDim.x >= 128 && tid < 64) idata[tid] += idata[tid + 64];
+    __syncthreads();
+
+    // unrolling warp
+    if (tid < 32) {
+        volatile int *vmem = idata;
+        vmem[tid] += vmem[tid + 32];
+        vmem[tid] += vmem[tid + 16];
+        vmem[tid] += vmem[tid + 8];
+        vmem[tid] += vmem[tid + 4];
+        vmem[tid] += vmem[tid + 2];
+        vmem[tid] += vmem[tid + 1];
+    }
+
+    // write result for this block to global mem
+    if (tid == 0) g_odata[blockIdx.x] = idata[0];
+}
+```
+
+如此，也会有更少的warp会被_syncthreads阻塞。但在本地进行试验，速度反而不如改进之前：
+
+```
+gpu Unrolling8 elapsed 0.55 ms gpu_sum: 2139353471 <<<grid 4096 block 512>>>
+    Memory Throughtput 86.26%
+gpu UnrollWarp8 elapsed 0.65 ms gpu_sum: 2139353471 <<<grid 4096 block 512>>>
+    Memory Throughtput 73.45%
+```
+
+### 规约操作完全展开 Reducing with Complete Unrolling
+
+若再编译时就能够知道循环数，就可以对其进行完全展开。由于线程块拥有的线程不会超过1024个，我们可以将循环进行完全展开：
+
+``` c
+__global__ void reduceCompleteUnrollWarps8 (int *g_idata, int *g_odata, unsigned int n)
+{
+    // set thread ID
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x * 8 + threadIdx.x;
+
+    // convert global data pointer to the local pointer of this block
+    int *idata = g_idata + blockIdx.x * blockDim.x * 8;
+
+    // unrolling 8
+    if (idx + 7 * blockDim.x < n)
+    {
+        int a1 = g_idata[idx];
+        int a2 = g_idata[idx + blockDim.x];
+        int a3 = g_idata[idx + 2 * blockDim.x];
+        int a4 = g_idata[idx + 3 * blockDim.x];
+        int b1 = g_idata[idx + 4 * blockDim.x];
+        int b2 = g_idata[idx + 5 * blockDim.x];
+        int b3 = g_idata[idx + 6 * blockDim.x];
+        int b4 = g_idata[idx + 7 * blockDim.x];
+        g_idata[idx] = a1 + a2 + a3 + a4 + b1 + b2 + b3 + b4;
+    }
+
+    __syncthreads();
+
+    // in-place reduction in global memory
+    if (blockDim.x >= 1024 && tid < 512) idata[tid] += idata[tid + 512];
+    __syncthreads();
+    if (blockDim.x >= 512 && tid < 256) idata[tid] += idata[tid + 256];
+    __syncthreads();
+    if (blockDim.x >= 256 && tid < 128) idata[tid] += idata[tid + 128];
+    __syncthreads();
+    if (blockDim.x >= 128 && tid < 64) idata[tid] += idata[tid + 64];
+    __syncthreads();
+
+    // unrolling warp
+    if (tid < 32) {
+        volatile int *vmem = idata;
+        vmem[tid] += vmem[tid + 32];
+        vmem[tid] += vmem[tid + 16];
+        vmem[tid] += vmem[tid + 8];
+        vmem[tid] += vmem[tid + 4];
+        vmem[tid] += vmem[tid + 2];
+        vmem[tid] += vmem[tid + 1];
+    }
+
+    // write result for this block to global mem
+    if (tid == 0) g_odata[blockIdx.x] = idata[0];
+}
+```
+
+效果如下：
+
+```
+gpu Unrolling8 elapsed 0.55 ms gpu_sum: 2139353471 <<<grid 4096 block 512>>>
+    Memory Throughtput 86.26%
+gpu UnrollWarp8 elapsed 0.65 ms gpu_sum: 2139353471 <<<grid 4096 block 512>>>
+    Memory Throughtput 73.45%
+gpu CompleteUnrollWarps8 0.64 ms gpu_sum: 2139353471 <<<grid 4096 block 512>>>
+    Memory Throughtput 74.70%
+```
+
+### 使用模板函数进行规约 Reducing with Template Functions 
+使用模板函数有助于进一步减少分支开销。CUDA的device函数支持template参数，我们可以用tempate函数的参数定义块大小：
+
+``` c
+template <unsigned int iBlockSize>
+__global__ void reduceCompleteUnroll(int *g_idata, int *g_odata,
+                                     unsigned int n)
+{
+    // set thread ID
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x * 8 + threadIdx.x;
+
+    // convert global data pointer to the local pointer of this block
+    int *idata = g_idata + blockIdx.x * blockDim.x * 8;
+
+    // unrolling 8
+    if (idx + 7 * blockDim.x < n)
+    {
+        int a1 = g_idata[idx];
+        int a2 = g_idata[idx + blockDim.x];
+        int a3 = g_idata[idx + 2 * blockDim.x];
+        int a4 = g_idata[idx + 3 * blockDim.x];
+        int b1 = g_idata[idx + 4 * blockDim.x];
+        int b2 = g_idata[idx + 5 * blockDim.x];
+        int b3 = g_idata[idx + 6 * blockDim.x];
+        int b4 = g_idata[idx + 7 * blockDim.x];
+        g_idata[idx] = a1 + a2 + a3 + a4 + b1 + b2 + b3 + b4;
+    }
+
+    __syncthreads();
+
+    // in-place reduction and complete unroll
+    if (iBlockSize >= 1024 && tid < 512) idata[tid] += idata[tid + 512];
+
+    __syncthreads();
+
+    if (iBlockSize >= 512 && tid < 256)  idata[tid] += idata[tid + 256];
+
+    __syncthreads();
+
+    if (iBlockSize >= 256 && tid < 128)  idata[tid] += idata[tid + 128];
+
+    __syncthreads();
+
+    if (iBlockSize >= 128 && tid < 64)   idata[tid] += idata[tid + 64];
+
+    __syncthreads();
+
+    // unrolling warp
+    if (tid < 32)
+    {
+        volatile int *vsmem = idata;
+        vsmem[tid] += vsmem[tid + 32];
+        vsmem[tid] += vsmem[tid + 16];
+        vsmem[tid] += vsmem[tid +  8];
+        vsmem[tid] += vsmem[tid +  4];
+        vsmem[tid] += vsmem[tid +  2];
+        vsmem[tid] += vsmem[tid +  1];
+    }
+
+    // write result for this block to global mem
+    if (tid == 0) g_odata[blockIdx.x] = idata[0];
+}
+```
+
+用template参数进行替换后，在编译时就会检查if语句是否满足，如果不满足将会移除对应的if语句。不过该内核必须由switch-case语句进行调用，如此编译器能够自动为特定的块大小优化代码。不过这也意味着块大小被限制在switch-case设定的几个值之中：
+
+``` c
+switch (blocksize)
+    {
+    case 1024:
+        reduceCompleteUnroll<1024><<<grid.x / 8, block>>>(d_idata, d_odata,
+                size);
+        break;
+
+    case 512:
+        reduceCompleteUnroll<512><<<grid.x / 8, block>>>(d_idata, d_odata,
+                size);
+        break;
+
+    case 256:
+        reduceCompleteUnroll<256><<<grid.x / 8, block>>>(d_idata, d_odata,
+                size);
+        break;
+
+    case 128:
+        reduceCompleteUnroll<128><<<grid.x / 8, block>>>(d_idata, d_odata,
+                size);
+        break;
+
+    case 64:
+        reduceCompleteUnroll<64><<<grid.x / 8, block>>>(d_idata, d_odata, size);
+        break;
+    }
+```
 
 
 
